@@ -1,0 +1,131 @@
+name: Build and Publish Docker Image
+
+# Builds the enclave-projects fork of opencloud-eu/opencloud as a
+# container image and publishes it to GitHub Container Registry on
+# every push to main, on every tag matching v*, and on every pull
+# request (PR builds are built but not pushed by default — they only
+# verify that the image still builds).
+#
+# Images are published to:
+#   ghcr.io/enclave-projects/opencloud
+#
+# Tags produced:
+#   - On push to main:       `main`, `main-<short-sha>`, `latest`
+#   - On semver tag (v*):    `vX.Y.Z`, `X.Y`, `X`, `latest`
+#   - On pull request:       `pr-<number>` (only when push is enabled)
+#
+# Authentication uses the workflow-scoped GITHUB_TOKEN; no additional
+# secrets are required for GHCR pushes from this repo.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push the built image to the registry'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build and publish image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Multi-arch builds require QEMU for the non-native target.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Determine whether we should push. We push on every event except
+      # pull_request (PR builds verify the image still builds but do
+      # not pollute the registry).
+      - name: Determine push behavior
+        id: push
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.push }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GitHub Container Registry
+        if: steps.push.outputs.value == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short,prefix={{branch}}-,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.push.outputs.value == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Re-use the GitHub Actions cache for incremental builds.
+          # Falls back gracefully on first run.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Image summary
+        if: steps.push.outputs.value == 'true'
+        run: |
+          {
+            echo "## Image published"
+            echo ""
+            echo "Tags pushed to \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`:"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
