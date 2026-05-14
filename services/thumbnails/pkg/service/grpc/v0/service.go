@@ -2,8 +2,10 @@ package svc
 
 import (
 	"context"
+	"mime"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 	merrors "go-micro.dev/v4/errors"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/opencloud-eu/reva/v2/pkg/bytesize"
 	revactx "github.com/opencloud-eu/reva/v2/pkg/ctx"
 	"github.com/opencloud-eu/reva/v2/pkg/rgrpc/todo/pool"
 	"github.com/opencloud-eu/reva/v2/pkg/storagespace"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/opencloud-eu/opencloud/pkg/log"
 	thumbnailssvc "github.com/opencloud-eu/opencloud/protogen/gen/opencloud/services/thumbnails/v0"
+	"github.com/opencloud-eu/opencloud/services/thumbnails/pkg/config"
 	terrors "github.com/opencloud-eu/opencloud/services/thumbnails/pkg/errors"
 	"github.com/opencloud-eu/opencloud/services/thumbnails/pkg/preprocessor"
 	"github.com/opencloud-eu/opencloud/services/thumbnails/pkg/service/grpc/v0/decorators"
@@ -39,6 +43,33 @@ func NewService(opts ...Option) decorators.DecoratedService {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("resolutions not configured correctly")
 	}
+
+	videoDecoder, videoEnabled := maybeBuildVideoDecoder(options.Config.Thumbnail.Video, logger)
+	if videoEnabled {
+		for _, mt := range options.Config.Thumbnail.Video.MimeTypes {
+			thumbnail.RegisterMimeType(mt)
+		}
+		logger.Info().
+			Strs("mimetypes", options.Config.Thumbnail.Video.MimeTypes).
+			Dur("ffmpeg_timeout", options.Config.Thumbnail.Video.FFmpegTimeout).
+			Str("max_input_file_size", options.Config.Thumbnail.Video.MaxInputFileSize).
+			Msg("video thumbnails enabled")
+	}
+
+	videoMimeSet := map[string]struct{}{}
+	for _, mt := range options.Config.Thumbnail.Video.MimeTypes {
+		videoMimeSet[strings.TrimSpace(mt)] = struct{}{}
+	}
+
+	var maxVideoFileSize uint64
+	if videoEnabled && options.Config.Thumbnail.Video.MaxInputFileSize != "" {
+		if vb, vErr := bytesize.Parse(options.Config.Thumbnail.Video.MaxInputFileSize); vErr == nil {
+			maxVideoFileSize = vb.Bytes()
+		} else {
+			logger.Warn().Err(vErr).Msg("could not parse Video.MaxInputFileSize, leaving cap unset")
+		}
+	}
+
 	svc := Thumbnail{
 		serviceID: options.Config.GRPC.Namespace + "." + options.Config.Service.Name,
 		manager: thumbnail.NewSimpleManager(
@@ -54,12 +85,52 @@ func NewService(opts ...Option) decorators.DecoratedService {
 		selector:     options.GatewaySelector,
 		preprocessorOpts: PreprocessorOpts{
 			TxtFontFileMap: options.Config.Thumbnail.FontMapFile,
+			VideoDecoder:   videoDecoder,
+			VideoEnabled:   videoEnabled,
 		},
-		dataEndpoint:   options.Config.Thumbnail.DataEndpoint,
-		transferSecret: options.Config.Thumbnail.TransferSecret,
+		dataEndpoint:     options.Config.Thumbnail.DataEndpoint,
+		transferSecret:   options.Config.Thumbnail.TransferSecret,
+		videoMimeTypes:   videoMimeSet,
+		maxVideoFileSize: maxVideoFileSize,
 	}
 
 	return svc
+}
+
+// maybeBuildVideoDecoder resolves the ffmpeg binary at startup and constructs a
+// VideoDecoder if both the operator opted in and the binary is reachable.
+//
+// Failures here are logged and the function returns videoEnabled=false; they
+// must never panic the service. When videoEnabled is false the rest of the
+// thumbnail pipeline behaves exactly as it did before this feature existed.
+func maybeBuildVideoDecoder(cfg config.Video, logger log.Logger) (preprocessor.VideoDecoder, bool) {
+	if !cfg.Enabled {
+		return preprocessor.VideoDecoder{}, false
+	}
+	binary := strings.TrimSpace(cfg.FFmpegBinary)
+	if binary == "" {
+		logger.Warn().Msg("video thumbnails: ffmpeg binary not configured, disabling video thumbnails")
+		return preprocessor.VideoDecoder{}, false
+	}
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		logger.Warn().
+			Str("binary", binary).
+			Err(err).
+			Msg("video thumbnails: ffmpeg binary not found on PATH, disabling video thumbnails")
+		return preprocessor.VideoDecoder{}, false
+	}
+	decoder, err := preprocessor.NewVideoDecoder(preprocessor.VideoDecoderConfig{
+		FFmpegBinary:   resolved,
+		FFmpegTimeout:  cfg.FFmpegTimeout,
+		SeekOffset:     cfg.SeekOffset,
+		MaxOutputBytes: cfg.MaxOutputBytes,
+	})
+	if err != nil {
+		logger.Warn().Err(err).Msg("video thumbnails: could not build decoder, disabling video thumbnails")
+		return preprocessor.VideoDecoder{}, false
+	}
+	return decoder, true
 }
 
 // Thumbnail implements the GRPC handler.
@@ -73,11 +144,22 @@ type Thumbnail struct {
 	logger           log.Logger
 	selector         pool.Selectable[gateway.GatewayAPIClient]
 	preprocessorOpts PreprocessorOpts
+	// videoMimeTypes is the immutable set of MIME types eligible for the
+	// video pipeline. Populated at startup; never mutated thereafter.
+	videoMimeTypes map[string]struct{}
+	// maxVideoFileSize is the parsed Video.MaxInputFileSize, in bytes.
+	// Zero means video thumbnails are disabled.
+	maxVideoFileSize uint64
 }
 
 // PreprocessorOpts holds the options for the preprocessor
 type PreprocessorOpts struct {
 	TxtFontFileMap string
+	// VideoDecoder is the per-service video decoder. The zero value is
+	// valid; in that case VideoEnabled is false and the preprocessor falls
+	// back to the image decoder for video MIME types.
+	VideoDecoder preprocessor.VideoDecoder
+	VideoEnabled bool
 }
 
 // GetThumbnail retrieves a thumbnail for an image
@@ -165,9 +247,7 @@ func (g Thumbnail) handleCS3Source(ctx context.Context, req *thumbnailssvc.GetTh
 	}
 
 	defer r.Close()
-	ppOpts := map[string]any{
-		"fontFileMap": g.preprocessorOpts.TxtFontFileMap,
-	}
+	ppOpts := g.buildPreprocessorOpts()
 	pp := preprocessor.ForType(sRes.GetInfo().GetMimeType(), ppOpts)
 	img, err := pp.Convert(r)
 	if err != nil {
@@ -183,6 +263,19 @@ func (g Thumbnail) handleCS3Source(ctx context.Context, req *thumbnailssvc.GetTh
 		return "", merrors.Forbidden(g.serviceID, "%s", err.Error())
 	}
 	return key, err
+}
+
+// buildPreprocessorOpts assembles the per-request options map for the
+// preprocessor. It is computed at call time so future preprocessor flags can
+// be added in one place.
+func (g Thumbnail) buildPreprocessorOpts() map[string]any {
+	opts := map[string]any{
+		"fontFileMap": g.preprocessorOpts.TxtFontFileMap,
+	}
+	if g.preprocessorOpts.VideoEnabled {
+		opts["videoDecoder"] = g.preprocessorOpts.VideoDecoder
+	}
+	return opts
 }
 
 func (g Thumbnail) handleWebdavSource(ctx context.Context, req *thumbnailssvc.GetThumbnailRequest) (string, error) {
@@ -261,9 +354,7 @@ func (g Thumbnail) handleWebdavSource(ctx context.Context, req *thumbnailssvc.Ge
 		return "", merrors.InternalServerError(g.serviceID, "could not get image from source: %s", err.Error())
 	}
 	defer r.Close()
-	ppOpts := map[string]any{
-		"fontFileMap": g.preprocessorOpts.TxtFontFileMap,
-	}
+	ppOpts := g.buildPreprocessorOpts()
 	pp := preprocessor.ForType(sRes.GetInfo().GetMimeType(), ppOpts)
 	img, err := pp.Convert(r)
 	if img == nil || err != nil {
@@ -327,5 +418,24 @@ func (g Thumbnail) stat(path, auth string) (*provider.StatResponse, error) {
 	if !thumbnail.IsMimeTypeSupported(rsp.GetInfo().GetMimeType()) {
 		return nil, merrors.NotFound(g.serviceID, "Unsupported file type")
 	}
+	// Per-MIME size enforcement. The image sources additionally cap on a
+	// (possibly higher) global limit, but here we reject videos that exceed
+	// the dedicated video cap so a large video cannot be fed into ffmpeg.
+	if _, isVideo := g.videoMimeTypes[parseMimeType(rsp.GetInfo().GetMimeType())]; isVideo {
+		if g.maxVideoFileSize > 0 && rsp.GetInfo().GetSize() > g.maxVideoFileSize {
+			return nil, merrors.Forbidden(g.serviceID, "%s", terrors.ErrVideoFileTooLarge.Error())
+		}
+	}
 	return rsp, nil
+}
+
+// parseMimeType normalizes a possibly-parameterized MIME type to its bare
+// "type/subtype" representation. It tolerates malformed inputs by returning
+// the unmodified string.
+func parseMimeType(m string) string {
+	mt, _, err := mime.ParseMediaType(m)
+	if err != nil {
+		return m
+	}
+	return mt
 }

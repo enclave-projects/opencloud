@@ -63,19 +63,36 @@ func NewService(opts ...Option) grpc.Service {
 		return grpc.Service{}
 	}
 
+	// Determine the upper bound the image sources will enforce. Video inputs
+	// are typically much larger than image inputs; when the video pipeline is
+	// enabled we want the source-level cap to be the larger of the two so
+	// videos under the (separately enforced) video cap are not rejected by
+	// the image cap. The per-MIME cap is still enforced server-side in
+	// service/grpc/v0/service.go::stat for defense in depth.
+	effectiveSourceLimit := b
+	if tconf.Video.Enabled && tconf.Video.MaxInputFileSize != "" {
+		if vb, vErr := bytesize.Parse(tconf.Video.MaxInputFileSize); vErr == nil {
+			if vb.Bytes() > effectiveSourceLimit.Bytes() {
+				effectiveSourceLimit = vb
+			}
+		} else {
+			options.Logger.Warn().Err(vErr).Msg("could not parse Video.MaxInputFileSize, falling back to image limit")
+		}
+	}
+
 	var thumbnail decorators.DecoratedService
 	{
 		thumbnail = svc.NewService(
 			svc.Config(options.Config),
 			svc.Logger(options.Logger),
-			svc.ThumbnailSource(imgsource.NewWebDavSource(tconf, b)),
+			svc.ThumbnailSource(imgsource.NewWebDavSource(tconf, effectiveSourceLimit)),
 			svc.ThumbnailStorage(
 				storage.NewFileSystemStorage(
 					tconf.FileSystemStorage,
 					options.Logger,
 				),
 			),
-			svc.CS3Source(imgsource.NewCS3Source(tconf, gatewaySelector, b)),
+			svc.CS3Source(imgsource.NewCS3Source(tconf, gatewaySelector, effectiveSourceLimit)),
 			svc.GatewaySelector(gatewaySelector),
 		)
 		thumbnail = decorators.NewInstrument(thumbnail, options.Metrics)

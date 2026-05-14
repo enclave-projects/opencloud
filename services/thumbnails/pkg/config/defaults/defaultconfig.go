@@ -3,12 +3,28 @@ package defaults
 import (
 	"path"
 	"strings"
+	"time"
 
 	"github.com/opencloud-eu/opencloud/pkg/config/defaults"
 	"github.com/opencloud-eu/opencloud/pkg/shared"
 	"github.com/opencloud-eu/opencloud/pkg/structs"
 	"github.com/opencloud-eu/opencloud/services/thumbnails/pkg/config"
 )
+
+// DefaultVideoMimeTypes returns the default list of video MIME types for which
+// the thumbnail service generates previews when ffmpeg is available.
+//
+// Kept exported so the runtime startup hook can reuse the same list when
+// registering MIME types with the thumbnail package.
+func DefaultVideoMimeTypes() []string {
+	return []string{
+		"video/mp4",
+		"video/webm",
+		"video/quicktime",
+		"video/x-matroska",
+		"video/x-msvideo",
+	}
+}
 
 // FullDefaultConfig returns a fully initialized default configuration
 func FullDefaultConfig() *config.Config {
@@ -58,6 +74,15 @@ func DefaultConfig() *config.Config {
 			MaxInputWidth:         7680,
 			MaxInputHeight:        7680,
 			MaxInputImageFileSize: "50MB",
+			Video: config.Video{
+				Enabled:          true,
+				FFmpegBinary:     "ffmpeg",
+				FFmpegTimeout:    30 * time.Second,
+				MaxInputFileSize: "512MB",
+				SeekOffset:       "00:00:01",
+				MimeTypes:        DefaultVideoMimeTypes(),
+				MaxOutputBytes:   128 * 1024 * 1024,
+			},
 		},
 	}
 }
@@ -85,5 +110,12 @@ func Sanitize(cfg *config.Config) {
 	// nothing to sanitize here atm
 	if len(cfg.Thumbnail.Resolutions) == 1 && strings.Contains(cfg.Thumbnail.Resolutions[0], ",") {
 		cfg.Thumbnail.Resolutions = strings.Split(cfg.Thumbnail.Resolutions[0], ",")
+	}
+	// Allow comma separated MIME types when supplied via a single env variable.
+	if len(cfg.Thumbnail.Video.MimeTypes) == 1 && strings.Contains(cfg.Thumbnail.Video.MimeTypes[0], ",") {
+		cfg.Thumbnail.Video.MimeTypes = strings.Split(cfg.Thumbnail.Video.MimeTypes[0], ",")
+	}
+	for i, mt := range cfg.Thumbnail.Video.MimeTypes {
+		cfg.Thumbnail.Video.MimeTypes[i] = strings.TrimSpace(mt)
 	}
 }

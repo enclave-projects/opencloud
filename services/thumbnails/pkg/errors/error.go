@@ -19,4 +19,10 @@ var (
 	ErrNoConverterForExtractedImageFromAudioFile = errors.New("thumbnails: could not find converter for image extracted from audio file")
 	// ErrCS3AuthorizationMissing defines an error when the CS3 authorization is missing
 	ErrCS3AuthorizationMissing = errors.New("thumbnails: cs3source - authorization missing")
+	// ErrVideoFileTooLarge defines an error when a video input exceeds the configured limit
+	ErrVideoFileTooLarge = errors.New("thumbnails: video file is too large")
+	// ErrVideoDecoderDisabled defines an error when the video decoder is invoked but disabled or misconfigured
+	ErrVideoDecoderDisabled = errors.New("thumbnails: video decoder is disabled or ffmpeg binary is unavailable")
+	// ErrVideoExtractionFailed defines an error when ffmpeg failed to extract a frame from the input
+	ErrVideoExtractionFailed = errors.New("thumbnails: ffmpeg failed to extract a frame from the input")
 )

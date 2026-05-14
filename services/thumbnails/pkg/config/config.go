@@ -3,6 +3,7 @@ package config
 
 import (
 	"context"
+	"time"
 
 	"github.com/opencloud-eu/opencloud/pkg/shared"
 	"go-micro.dev/v4/client"
@@ -46,4 +47,16 @@ type Thumbnail struct {
 	MaxInputWidth         int               `yaml:"max_input_width" env:"THUMBNAILS_MAX_INPUT_WIDTH" desc:"The maximum width of an input image which is being processed." introductionVersion:"1.0.0"`
 	MaxInputHeight        int               `yaml:"max_input_height" env:"THUMBNAILS_MAX_INPUT_HEIGHT" desc:"The maximum height of an input image which is being processed." introductionVersion:"1.0.0"`
 	MaxInputImageFileSize string            `yaml:"max_input_image_file_size" env:"THUMBNAILS_MAX_INPUT_IMAGE_FILE_SIZE" desc:"The maximum file size of an input image which is being processed. Usable common abbreviations: [KB, KiB, MB, MiB, GB, GiB, TB, TiB, PB, PiB, EB, EiB], example: 2GB." introductionVersion:"1.0.0"`
+	Video                 Video             `yaml:"video"`
+}
+
+// Video defines the available video thumbnail related configuration.
+type Video struct {
+	Enabled          bool          `yaml:"enabled" env:"THUMBNAILS_VIDEO_ENABLED" desc:"Enable video thumbnail generation. Requires the ffmpeg binary to be available at startup. If ffmpeg is not found, video thumbnails stay disabled regardless of this flag." introductionVersion:"7.0.0"`
+	FFmpegBinary     string        `yaml:"ffmpeg_binary" env:"THUMBNAILS_VIDEO_FFMPEG_BINARY" desc:"The path to (or name of) the ffmpeg binary used for extracting video frames. If only a name is given, the binary is resolved via PATH at startup." introductionVersion:"7.0.0"`
+	FFmpegTimeout    time.Duration `yaml:"ffmpeg_timeout" env:"THUMBNAILS_VIDEO_FFMPEG_TIMEOUT" desc:"Maximum wall-clock duration of the ffmpeg subprocess per request. The subprocess is killed when this elapses." introductionVersion:"7.0.0"`
+	MaxInputFileSize string        `yaml:"max_input_file_size" env:"THUMBNAILS_VIDEO_MAX_INPUT_FILE_SIZE" desc:"The maximum file size of an input video which is being processed. Files larger than this are rejected before any frame extraction is attempted. Usable common abbreviations: [KB, KiB, MB, MiB, GB, GiB, TB, TiB]. Example: 512MB." introductionVersion:"7.0.0"`
+	SeekOffset       string        `yaml:"seek_offset" env:"THUMBNAILS_VIDEO_SEEK_OFFSET" desc:"The offset (HH:MM:SS or ffmpeg-compatible duration) where the frame is extracted. Server-controlled; never user-supplied." introductionVersion:"7.0.0"`
+	MimeTypes        []string      `yaml:"mimetypes" env:"THUMBNAILS_VIDEO_MIMETYPES" desc:"Comma separated list of video MIME types to enable previews for. Defaults to mp4, webm, quicktime/mov, mkv and avi. See the Environment Variable Types description for more details." introductionVersion:"7.0.0"`
+	MaxOutputBytes   int64         `yaml:"max_output_bytes" env:"THUMBNAILS_VIDEO_MAX_OUTPUT_BYTES" desc:"Hard cap on the number of bytes read from ffmpeg's stdout per request. Defends against pathological inputs producing very large frames." introductionVersion:"7.0.0"`
 }

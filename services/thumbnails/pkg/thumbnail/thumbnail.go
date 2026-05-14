@@ -111,6 +111,22 @@ func IsMimeTypeSupported(m string) bool {
 	return supported
 }
 
+// RegisterMimeType adds a new MIME type to the set of supported types.
+//
+// Must only be called during service startup, before any handler starts
+// serving requests. Concurrent registration is safe (single-writer at
+// startup), but it is NOT safe to call this once handlers are actively
+// reading SupportedMimeTypes.
+func RegisterMimeType(m string) {
+	if m == "" {
+		return
+	}
+	if _, _, err := mime.ParseMediaType(m); err != nil {
+		return
+	}
+	SupportedMimeTypes[m] = struct{}{}
+}
+
 // PrepareRequest prepare the request based on image parameters
 func PrepareRequest(width, height int, tType, checksum, pID string) (Request, error) {
 	generator, err := GeneratorFor(tType, pID)

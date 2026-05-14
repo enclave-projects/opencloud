@@ -344,6 +344,26 @@ func ForType(mimeType string, opts map[string]any) FileConverter {
 		fallthrough
 	case "audio/ogg":
 		return AudioDecoder{}
+	case "video/mp4",
+		"video/webm",
+		"video/quicktime",
+		"video/x-matroska",
+		"video/x-msvideo",
+		"video/mpeg",
+		"video/3gpp",
+		"video/ogg":
+		// The VideoDecoder is constructed at service startup with the
+		// resolved ffmpeg binary path and friends; we pull it from the
+		// opts map keyed by "videoDecoder". If it is not present (which
+		// happens when ffmpeg is missing or the operator disabled video
+		// thumbnails), we fall back to the image decoder so the request
+		// surfaces a clear decoding error instead of panicking.
+		if v, ok := opts["videoDecoder"]; ok {
+			if decoder, ok := v.(VideoDecoder); ok {
+				return decoder
+			}
+		}
+		return ImageDecoder{}
 	default:
 		return ImageDecoder{}
 	}
